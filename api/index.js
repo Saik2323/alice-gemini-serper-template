@@ -3,8 +3,8 @@ const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
 const TOTAL_RESPONSE_BUDGET_MS = 3600;
-const SERPER_TIMEOUT_MS = 600;
-const GEMINI_TIMEOUT_MS = 2500;
+const SERPER_TIMEOUT_MS = 1800;
+const GEMINI_TIMEOUT_MS = 3400;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -63,7 +63,13 @@ async function fetchJson(url, options, timeoutMs) {
   try {
     const response = await fetch(url, { ...options, signal: controller.signal });
     const data = await response.json().catch(() => ({}));
+    if (controller.signal.aborted) throw new Error("TIME_BUDGET_EXHAUSTED");
     return { response, data };
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === "AbortError") {
+      throw new Error("TIME_BUDGET_EXHAUSTED");
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -71,7 +77,8 @@ async function fetchJson(url, options, timeoutMs) {
 
 async function searchWeb(query, timeoutMs) {
   const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 150) return "";
+  if (!key || timeoutMs < 150) return null;
+  const startedAt = Date.now();
 
   try {
     const { response, data } = await fetchJson(
@@ -89,7 +96,7 @@ async function searchWeb(query, timeoutMs) {
 
     if (!response.ok) {
       console.warn("Serper request failed with HTTP", response.status);
-      return "";
+      return null;
     }
 
     const items = (Array.isArray(data.organic) ? data.organic : [])
@@ -103,10 +110,15 @@ async function searchWeb(query, timeoutMs) {
 
     const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
     if (answerBox) items.unshift(`Краткий ответ поисковика: ${String(answerBox).slice(0, 350)}`);
-    return items.length ? items.join("\n") : "";
+    const first = (data.organic || []).find(item => item.snippet);
+    const fallback = answerBox
+      ? `По результатам поиска: ${String(answerBox).slice(0, 700)}`
+      : first ? `По результатам поиска, ${String(first.title || "источник").slice(0, 150)}: ${String(first.snippet).slice(0, 700)}` : "";
+    console.info("Serper completed", { durationMs: Date.now() - startedAt, results: items.length });
+    return items.length ? { context: items.join("\n"), fallback } : null;
   } catch (error) {
-    console.warn("Serper request did not finish in time; continuing without search.");
-    return "";
+    console.warn("Serper unavailable", { durationMs: Date.now() - startedAt, reason: error?.message === "TIME_BUDGET_EXHAUSTED" ? "timeout" : "network" });
+    return null;
   }
 }
 
@@ -218,18 +230,20 @@ export default async function handler(req, res) {
     ));
   }
 
+  let searchResult = null;
   try {
-    let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      // Search has a very short budget because Alice expects a response within 4.5 seconds.
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2600)));
+      searchResult = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, remainingMs() - 1000));
+      if (!searchResult) {
+        return res.status(200).json(aliceResponse("Сейчас не удалось получить результаты поиска. Попробуйте ещё раз чуть позже.", false, oldHistory));
+      }
     }
 
     const answer = await askGemini(
       text,
       oldHistory,
-      searchContext,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 600))
+      searchResult?.context || "",
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 100))
     );
 
     const history = [
@@ -240,8 +254,14 @@ export default async function handler(req, res) {
 
     return res.status(200).json(aliceResponse(answer, false, history));
   } catch (error) {
-    const safeError = error?.message === "AbortError" ? "TIME_BUDGET_EXHAUSTED" : error;
+    const safeError = error?.name === "AbortError" ? new Error("TIME_BUDGET_EXHAUSTED") : error;
     console.warn("Alice webhook returned a fallback response:", safeError?.message || "unknown error");
+    if (searchResult?.fallback) {
+      console.info("Returning search excerpt", { durationMs: Date.now() - startedAt });
+      const answer = fitAliceText(searchResult.fallback);
+      const history = [...oldHistory, { role: "user", text: text.slice(0, MAX_HISTORY_MESSAGE_CHARS) }, { role: "model", text: answer }].slice(-MAX_HISTORY_MESSAGES);
+      return res.status(200).json(aliceResponse(answer, false, history));
+    }
     return res.status(200).json(aliceResponse(errorForUser(safeError), false, oldHistory));
   }
 }
