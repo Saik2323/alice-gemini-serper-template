@@ -67,3 +67,23 @@ test("Google overload is reported separately from a key or timeout error", async
   const result = await invoke("Расскажи про Луну");
   assert.match(result.response.text, /Gemini сейчас перегружен/);
 });
+
+test("configured Flash model uses minimal reasoning and returns only spoken text", async t => {
+  const previousModel = process.env.GEMINI_MODEL;
+  process.env.GEMINI_MODEL = "gemini-3.6-flash";
+  t.after(() => {
+    if (previousModel === undefined) delete process.env.GEMINI_MODEL;
+    else process.env.GEMINI_MODEL = previousModel;
+  });
+  setup(t, async (url, options) => {
+    assert.match(url, /models\/gemini-3\.6-flash:generateContent$/);
+    const body = JSON.parse(options.body);
+    assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "minimal");
+    assert.equal(body.generationConfig.temperature, undefined);
+    return Response.json({ candidates: [{ content: { parts: [
+      { thought: true, text: "Internal reasoning" }, { text: "Париж." }
+    ] } }] });
+  });
+  const result = await invoke("Назови столицу Франции");
+  assert.equal(result.response.text, "Париж.");
+});

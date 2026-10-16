@@ -129,6 +129,13 @@ async function askGemini(text, history, searchContext, timeoutMs) {
 
   const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
   if (!/^[A-Za-z0-9._-]+$/.test(model)) throw new Error("INVALID_MODEL_NAME");
+  const startedAt = Date.now();
+  // These Flash models support minimal reasoning for short voice replies.
+  // Other models keep their own defaults rather than receiving unsupported options.
+  const generationConfig = { maxOutputTokens: 240 };
+  if (/^gemini-3\.(1|5|6)-flash(-lite)?$/.test(model)) {
+    generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
+  }
 
   const contents = safeHistory(history).map(item => ({
     role: item.role,
@@ -151,10 +158,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
-        generationConfig: {
-          temperature: 0.5,
-          maxOutputTokens: 240
-        }
+        generationConfig
       })
     },
     Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
@@ -162,7 +166,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
 
   if (!response.ok) {
     const status = Number(response.status);
-    console.error("Gemini request failed with HTTP", status);
+    console.error("Gemini request failed", { model, status, durationMs: Date.now() - startedAt });
     if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
     if (status === 429) throw new Error("GEMINI_QUOTA");
     if (status === 503) throw new Error("GEMINI_UNAVAILABLE");
@@ -171,6 +175,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
 
   const candidate = data?.candidates?.[0];
   const answer = (candidate?.content?.parts || [])
+    .filter(part => !part.thought)
     .map(part => typeof part.text === "string" ? part.text : "")
     .join("")
     .trim();
@@ -182,6 +187,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   if (candidate?.finishReason === "MAX_TOKENS") {
     console.warn("Gemini reached the output token limit.");
   }
+  console.info("Gemini completed", { model, durationMs: Date.now() - startedAt });
   return answer;
 }
 
