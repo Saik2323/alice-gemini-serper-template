@@ -61,3 +61,9 @@ test("ordinary Gemini abort gives a timeout message", async t => {
   const result = await invoke("Сколько будет два плюс два?");
   assert.match(result.response.text, /Не успела подготовить ответ/);
 });
+
+test("Google overload is reported separately from a key or timeout error", async t => {
+  setup(t, async () => Response.json({ error: { status: "UNAVAILABLE" } }, { status: 503 }));
+  const result = await invoke("Расскажи про Луну");
+  assert.match(result.response.text, /Gemini сейчас перегружен/);
+});

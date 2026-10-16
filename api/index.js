@@ -113,7 +113,7 @@ async function searchWeb(query, timeoutMs) {
     const first = (data.organic || []).find(item => item.snippet);
     const fallback = answerBox
       ? `По результатам поиска: ${String(answerBox).slice(0, 700)}`
-      : first ? `По результатам поиска, ${String(first.title || "источник").slice(0, 150)}: ${String(first.snippet).slice(0, 700)}` : "";
+      : first ? `По результатам поиска, ${String(first.title || "источник").slice(0, 150)}: ${String(first.snippet).slice(0, 550)} ${String(first.link || "").slice(0, 240)}`.trim() : "";
     console.info("Serper completed", { durationMs: Date.now() - startedAt, results: items.length });
     return items.length ? { context: items.join("\n"), fallback } : null;
   } catch (error) {
@@ -165,6 +165,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     console.error("Gemini request failed with HTTP", status);
     if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
     if (status === 429) throw new Error("GEMINI_QUOTA");
+    if (status === 503) throw new Error("GEMINI_UNAVAILABLE");
     throw new Error("GEMINI_REQUEST_FAILED");
   }
 
@@ -192,6 +193,8 @@ function errorForUser(error) {
       return "Не удалось подключиться к Gemini. Проверьте API-ключ в настройках Vercel.";
     case "GEMINI_QUOTA":
       return "Сейчас превышен лимит запросов к Gemini. Попробуйте немного позже.";
+    case "GEMINI_UNAVAILABLE":
+      return "Сервис Gemini сейчас перегружен. Попробуйте задать вопрос немного позже.";
     case "GEMINI_BLOCKED":
       return "Я не смогла обработать этот запрос. Попробуйте спросить иначе.";
     case "TIME_BUDGET_EXHAUSTED":
